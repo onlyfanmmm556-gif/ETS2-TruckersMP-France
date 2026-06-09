@@ -7,23 +7,13 @@ const {
 const axios = require("axios");
 const cron = require("node-cron");
 
-// ─────────────────────────────────────────────
-//  Configuration via variables d'environnement
-// ─────────────────────────────────────────────
 const DISCORD_TOKEN  = process.env.DISCORD_TOKEN;
 const CHANNEL_ID     = process.env.CHANNEL_ID;
 const STATS_INTERVAL = process.env.STATS_INTERVAL || "0 * * * *";
 const MAX_COMPANIES  = parseInt(process.env.MAX_COMPANIES || "10");
 const BOT_NAME       = process.env.BOT_NAME || "TruckyStatsBotFR";
+const DEBUG_MODE     = process.env.DEBUG_MODE === "true"; // mettre true pour voir la structure
 
-// Valeurs possibles du champ "country" dans l'API Trucky pour la France
-const FRENCH_COUNTRY_VALUES = [
-  "france", "fr", "french", "france (fr)", "fra"
-];
-
-// ─────────────────────────────────────────────
-//  Client HTTP Trucky
-// ─────────────────────────────────────────────
 const truckyApi = axios.create({
   baseURL: "https://e.truckyapp.com/api/v1",
   headers: {
@@ -34,23 +24,18 @@ const truckyApi = axios.create({
   timeout: 20000,
 });
 
-// ─────────────────────────────────────────────
-//  Helper : extraire les items d'une réponse API
-//  (l'API Trucky peut retourner plusieurs structures)
-// ─────────────────────────────────────────────
+// ─── Extraction des items selon la structure retournée ───
 function extractItems(raw) {
-  if (Array.isArray(raw))                        return raw;
-  if (Array.isArray(raw.response))               return raw.response;
-  if (Array.isArray(raw.data))                   return raw.data;
-  if (Array.isArray(raw.companies))              return raw.companies;
-  if (raw.response && Array.isArray(raw.response.data)) return raw.response.data;
-  if (raw.response && Array.isArray(raw.response.companies)) return raw.response.companies;
+  if (Array.isArray(raw))                              return raw;
+  if (Array.isArray(raw.response))                     return raw.response;
+  if (Array.isArray(raw.data))                         return raw.data;
+  if (Array.isArray(raw.companies))                    return raw.companies;
+  if (raw.response?.data && Array.isArray(raw.response.data))   return raw.response.data;
+  if (raw.response?.companies && Array.isArray(raw.response.companies)) return raw.response.companies;
   return [];
 }
 
-// ─────────────────────────────────────────────
-//  Helper : lire un champ imbriqué (a.b.c)
-// ─────────────────────────────────────────────
+// ─── Lire un champ potentiellement imbriqué ───
 function getVal(obj, ...keys) {
   for (const key of keys) {
     let val = obj;
@@ -60,276 +45,270 @@ function getVal(obj, ...keys) {
   return null;
 }
 
-// ─────────────────────────────────────────────
-//  Détection entreprise française
-//  On cherche dans TOUS les champs liés au pays
-// ─────────────────────────────────────────────
+// ─── Champs KM réels (tous les noms possibles) ───
+function getKm(c) {
+  return getVal(c,
+    "real_km", "realKm", "real_distance",
+    "stats.real_km", "stats.realKm", "stats.real_distance",
+    "total_real_km", "distance_real", "km_real",
+    "profile.real_km", "summary.real_km"
+  );
+}
+
+function getMembers(c) {
+  return getVal(c, "members_count", "members", "stats.members_count", "profile.members_count", "membersCount");
+}
+
+function getJobs(c) {
+  return getVal(c, "jobs_count", "stats.jobs_count", "total_jobs", "deliveries_count", "jobsCount");
+}
+
+// ─── Détection France : cherche dans TOUS les champs de l'objet ───
 function isFrench(company) {
-  const fields = [
-    getVal(company, "country"),
-    getVal(company, "country_name"),
-    getVal(company, "country_code"),
-    getVal(company, "profile.country"),
-    getVal(company, "info.country"),
-  ].filter(Boolean).map(v => String(v).toLowerCase().trim());
-
-  return fields.some(f => FRENCH_COUNTRY_VALUES.includes(f));
-}
-
-// ─────────────────────────────────────────────
-//  Récupération de TOUTES les entreprises
-//  puis filtrage côté client sur pays = France
-// ─────────────────────────────────────────────
-async function getFrenchCompanies() {
-  let page = 1;
-  let allFrench = [];
-  let hasMore = true;
-  let firstItemKeys = null;
-
-  console.log("[Trucky] Début de la récupération des entreprises...");
-
-  while (hasMore) {
-    try {
-      // On essaie avec country=FR ET sans, selon la page
-      const params = { page, limit: 50 };
-
-      const response = await truckyApi.get("/companies", { params });
-      const raw = response.data;
-      const items = extractItems(raw);
-
-      // Log de la structure au 1er appel pour debug
-      if (page === 1) {
-        firstItemKeys = items[0] ? Object.keys(items[0]) : [];
-        console.log("[Trucky] Structure d'un item :", firstItemKeys.join(", "));
-        if (items[0]) {
-          const sample = {
-            name: items[0].name,
-            country: getVal(items[0], "country", "country_name", "country_code"),
-            real_km: getVal(items[0], "real_km", "stats.real_km", "total_real_km", "distance_real"),
-          };
-          console.log("[Trucky] Exemple item:", JSON.stringify(sample));
-        }
+  // Valeurs reconnues comme "France"
+  const FR_VALUES = ["france", "fr", "french", "fra", "france (fr)"];
+  
+  // On cherche dans toutes les clés de l'objet (pas seulement "country")
+  function searchInObject(obj, depth = 0) {
+    if (depth > 3 || !obj || typeof obj !== "object") return false;
+    for (const [key, val] of Object.entries(obj)) {
+      if (typeof val === "string") {
+        const lower = val.toLowerCase().trim();
+        if (FR_VALUES.includes(lower)) return true;
+        // Si la clé contient "country" ou "nation", on est plus souple
+        if ((key.toLowerCase().includes("country") || key.toLowerCase().includes("nation")) 
+            && lower.includes("fr")) return true;
+      } else if (typeof val === "object" && val !== null) {
+        if (searchInObject(val, depth + 1)) return true;
       }
-
-      if (items.length === 0) {
-        hasMore = false;
-      } else {
-        // Filtrage : on garde uniquement les entreprises françaises
-        const french = items.filter(isFrench);
-        allFrench = allFrench.concat(french);
-        console.log(`[Trucky] Page ${page}: ${items.length} items, ${french.length} françaises (total: ${allFrench.length})`);
-
-        if (items.length < 50 || page >= 30) hasMore = false;
-        else page++;
-
-        // Petite pause pour ne pas surcharger l'API
-        if (hasMore) await new Promise(r => setTimeout(r, 300));
-      }
-    } catch (err) {
-      const status = err.response?.status;
-      console.error(`[Trucky] Erreur page ${page} (HTTP ${status || "?"}):`, err.message);
-      hasMore = false;
     }
+    return false;
   }
-
-  console.log(`[Trucky] ✅ ${allFrench.length} entreprises françaises trouvées sur ${page} pages`);
-  return allFrench;
+  
+  return searchInObject(company);
 }
 
-// ─────────────────────────────────────────────
-//  Formatage des nombres
-// ─────────────────────────────────────────────
+// ─── Formatage ───
 function fmt(n) {
   if (n === null || n === undefined) return "N/A";
   return Number(n).toLocaleString("fr-FR");
 }
-
 function fmtKm(km) {
   const v = Number(km);
-  if (!km && km !== 0 || isNaN(v)) return "N/A";
+  if (!km && km !== 0 || isNaN(v)) return "—";
   if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(2)} M km`;
   if (v >= 1_000)     return `${(v / 1_000).toFixed(1)} k km`;
   return `${fmt(v)} km`;
 }
-
-function recruitLabel(company) {
-  const v = getVal(company, "recruitment_status", "is_recruiting", "open_recruitment", "recruiting");
+function recruitLabel(c) {
+  const v = getVal(c, "recruitment_status", "is_recruiting", "open_recruitment", "recruiting", "recruitment");
   if (v === null) return "";
   const s = String(v).toLowerCase();
-  if (s === "open" || s === "true" || s === "1" || s === "yes") return "✅ Recrute";
-  return "🔒 Fermé";
+  return (s === "open" || s === "true" || s === "1" || s === "yes") ? "✅ Recrute" : "🔒 Fermé";
 }
 
-// ─────────────────────────────────────────────
-//  Champs KM réels — l'API peut les nommer différemment
-// ─────────────────────────────────────────────
-function getKm(company) {
-  return getVal(
-    company,
-    "real_km",
-    "stats.real_km",
-    "total_real_km",
-    "distance_real",
-    "km_real",
-    "realKm",
-    "stats.distance_real",
-    "profile.real_km"
-  );
+// ─── Récupère toutes les pages ───
+async function getAllCompanies() {
+  let page = 1, all = [], hasMore = true;
+  while (hasMore) {
+    try {
+      const r = await truckyApi.get("/companies", { params: { page, limit: 50 } });
+      const items = extractItems(r.data);
+      if (!items.length) { hasMore = false; break; }
+      all = all.concat(items);
+      console.log(`[API] Page ${page}: ${items.length} items (total ${all.length})`);
+      if (items.length < 50 || page >= 30) hasMore = false;
+      else { page++; await new Promise(res => setTimeout(res, 300)); }
+    } catch (e) {
+      console.error(`[API] Erreur page ${page}:`, e.response?.status, e.message);
+      hasMore = false;
+    }
+  }
+  return all;
 }
 
-function getMembers(company) {
-  return getVal(company, "members_count", "members", "stats.members_count", "profile.members_count");
+// ─── Embed debug : montre la structure brute à Discord ───
+async function sendDebugInfo(channel) {
+  try {
+    const r = await truckyApi.get("/companies", { params: { page: 1, limit: 3 } });
+    const items = extractItems(r.data);
+    const first = items[0];
+    
+    if (!first) {
+      return channel.send({ embeds: [new EmbedBuilder().setDescription("❌ Aucun item retourné par l'API").setColor(0xff0000)] });
+    }
+
+    const keys = Object.keys(first);
+    // On cherche les champs qui pourraient indiquer le pays
+    const countryFields = keys.filter(k => 
+      k.toLowerCase().includes("country") || 
+      k.toLowerCase().includes("nation") || 
+      k.toLowerCase().includes("lang") ||
+      k.toLowerCase().includes("location")
+    );
+    
+    // Champs KM
+    const kmFields = keys.filter(k => 
+      k.toLowerCase().includes("km") || 
+      k.toLowerCase().includes("distance") || 
+      k.toLowerCase().includes("miles")
+    );
+
+    let desc = `**Toutes les clés du 1er item :**\n\`${keys.join(", ")}\`\n\n`;
+    
+    desc += `**Champs pays potentiels :**\n`;
+    if (countryFields.length) {
+      countryFields.forEach(f => desc += `\`${f}\` = \`${JSON.stringify(first[f])}\`\n`);
+    } else {
+      desc += "_(aucun champ avec 'country' dans le nom)_\n";
+    }
+
+    desc += `\n**Champs KM potentiels :**\n`;
+    if (kmFields.length) {
+      kmFields.forEach(f => desc += `\`${f}\` = \`${JSON.stringify(first[f])}\`\n`);
+    } else {
+      desc += "_(aucun champ avec 'km' dans le nom)_\n";
+    }
+
+    desc += `\n**Exemple d'item complet :**\n\`\`\`json\n${JSON.stringify(first, null, 2).slice(0, 900)}\`\`\``;
+
+    await channel.send({
+      embeds: [new EmbedBuilder()
+        .setTitle("🔍 Structure brute API Trucky")
+        .setDescription(desc.slice(0, 4096))
+        .setColor(0x5865f2)
+        .setFooter({ text: "DEBUG_MODE=true — désactive avec DEBUG_MODE=false" })]
+    });
+
+    // Si des sous-objets existent, les afficher aussi
+    const subObjects = keys.filter(k => first[k] && typeof first[k] === "object" && !Array.isArray(first[k]));
+    if (subObjects.length) {
+      let subDesc = "**Contenu des sous-objets :**\n";
+      subObjects.forEach(k => {
+        subDesc += `\n**${k}:**\n\`\`\`json\n${JSON.stringify(first[k], null, 2).slice(0, 300)}\`\`\``;
+      });
+      await channel.send({
+        embeds: [new EmbedBuilder()
+          .setTitle("🔍 Sous-objets API Trucky")
+          .setDescription(subDesc.slice(0, 4096))
+          .setColor(0x5865f2)]
+      });
+    }
+  } catch (e) {
+    channel.send({ embeds: [new EmbedBuilder().setDescription(`❌ Erreur debug: ${e.message}`).setColor(0xff0000)] });
+  }
 }
 
-function getJobs(company) {
-  return getVal(company, "jobs_count", "stats.jobs_count", "total_jobs", "deliveries_count");
-}
-
-// ─────────────────────────────────────────────
-//  Construction de l'embed Discord
-// ─────────────────────────────────────────────
+// ─── Embed stats ───
 function buildEmbed(companies) {
   const now = new Date().toLocaleDateString("fr-FR", {
-    day: "2-digit", month: "long", year: "numeric",
-    hour: "2-digit", minute: "2-digit",
+    day: "2-digit", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit",
   });
-
-  // Tri : si tous les KM sont null, on trie par membres
-  const hasKmData = companies.some(c => getKm(c) !== null);
+  const hasKm = companies.some(c => getKm(c) !== null);
   const sorted = [...companies]
-    .sort((a, b) => {
-      if (hasKmData) return (getKm(b) ?? 0) - (getKm(a) ?? 0);
-      return (getMembers(b) ?? 0) - (getMembers(a) ?? 0);
-    })
+    .sort((a, b) => hasKm ? (getKm(b) ?? 0) - (getKm(a) ?? 0) : (getMembers(b) ?? 0) - (getMembers(a) ?? 0))
     .slice(0, MAX_COMPANIES);
 
-  // Totaux
   const totalKm      = companies.reduce((s, c) => s + (getKm(c) ?? 0), 0);
   const totalMembers = companies.reduce((s, c) => s + (getMembers(c) ?? 0), 0);
   const totalJobs    = companies.reduce((s, c) => s + (getJobs(c) ?? 0), 0);
-
-  const sortLabel = hasKmData ? "KM réels" : "membres (KM non dispo)";
 
   const embed = new EmbedBuilder()
     .setTitle("🇫🇷  Statistiques des VTCs Françaises — Trucky Hub")
     .setColor(0x0055a4)
     .setDescription(
-      `**${fmt(companies.length)}** entreprises françaises enregistrées sur Trucky\n\n` +
+      `**${fmt(companies.length)}** entreprises françaises sur Trucky\n\n` +
       `> 🛣️  **KM réels cumulés** : **${totalKm > 0 ? fmtKm(totalKm) : "Non disponible"}**\n` +
       `> 👥  **Membres totaux** : **${fmt(totalMembers)}**\n` +
-      `> 📦  **Livraisons totales** : **${totalJobs > 0 ? fmt(totalJobs) : "Non disponible"}**`
+      `> 📦  **Livraisons** : **${totalJobs > 0 ? fmt(totalJobs) : "Non disponible"}**`
     )
     .setFooter({ text: `Mise à jour : ${now}  •  hub.truckyapp.com` })
     .setTimestamp();
 
-  // Classement
-  if (sorted.length > 0) {
-    const medals = ["🥇", "🥈", "🥉"];
-    let board = "";
-
-    sorted.forEach((c, i) => {
-      const medal   = medals[i] ?? `**${i + 1}.**`;
-      const name    = c.name ?? c.company_name ?? "Nom inconnu";
-      const km      = getKm(c);
-      const members = getMembers(c);
-      const jobs    = getJobs(c);
-      const recruit = recruitLabel(c);
-
-      board += `${medal} **${name}**\n`;
-      board += `　🛣️ ${km !== null ? fmtKm(km) : "—"}`;
-      board += `  👥 ${members !== null ? fmt(members) + " membres" : "—"}`;
-      if (jobs)    board += `  📦 ${fmt(jobs)}`;
-      if (recruit) board += `  ${recruit}`;
-      board += "\n\n";
-    });
-
-    embed.addFields({
-      name: `🏆  Top ${sorted.length} VTCs françaises par ${sortLabel}`,
-      value: board,
-    });
-  } else {
-    embed.addFields({
-      name: "ℹ️  Résultat",
-      value: "Aucune entreprise française trouvée dans le directory Trucky.",
-    });
-  }
-
-  embed.addFields({
-    name: "🔗  Directory complet",
-    value: "[hub.truckyapp.com/directory](https://hub.truckyapp.com/directory)",
-    inline: true,
+  const medals = ["🥇", "🥈", "🥉"];
+  let board = "";
+  sorted.forEach((c, i) => {
+    const name    = c.name ?? c.company_name ?? "Inconnu";
+    const km      = getKm(c);
+    const members = getMembers(c);
+    const jobs    = getJobs(c);
+    const recruit = recruitLabel(c);
+    board += `${medals[i] ?? `**${i+1}.**`} **${name}**\n`;
+    board += `　🛣️ ${km !== null ? fmtKm(km) : "—"}  👥 ${members !== null ? fmt(members) + " mbr" : "—"}`;
+    if (jobs)    board += `  📦 ${fmt(jobs)}`;
+    if (recruit) board += `  ${recruit}`;
+    board += "\n\n";
   });
 
+  if (board) embed.addFields({ name: `🏆  Top ${sorted.length} VTCs par ${hasKm ? "KM réels" : "membres"}`, value: board });
+  embed.addFields({ name: "🔗  Directory", value: "[hub.truckyapp.com/directory](https://hub.truckyapp.com/directory)", inline: true });
   return embed;
 }
 
-// ─────────────────────────────────────────────
-//  Bot Discord
-// ─────────────────────────────────────────────
+// ─── Bot Discord ───
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-client.once("ready", () => {
-  console.log(`[Discord] ✅ Connecté : ${client.user.tag}`);
+client.once("ready", async () => {
+  console.log(`[Discord] ✅ ${client.user.tag}`);
   client.user.setActivity("les VTCs 🇫🇷", { type: ActivityType.Watching });
+
+  const channel = await client.channels.fetch(CHANNEL_ID).catch(() => null);
+  if (!channel) { console.error("❌ Salon introuvable"); return; }
+
+  if (DEBUG_MODE) {
+    console.log("[DEBUG] Mode debug activé — affichage structure API");
+    await sendDebugInfo(channel);
+    return; // En mode debug on n'envoie pas les stats
+  }
+
   sendStats();
-  cron.schedule(STATS_INTERVAL, () => {
-    console.log("[Cron] Déclenchement planifié");
-    sendStats();
-  });
+  cron.schedule(STATS_INTERVAL, () => sendStats());
 });
 
 async function sendStats() {
-  console.log("[Bot] ─── Envoi des stats Trucky ───");
-  const channel = await client.channels.fetch(CHANNEL_ID).catch(e => {
-    console.error("[Discord] Salon introuvable :", e.message);
-    return null;
-  });
+  console.log("[Bot] ─── sendStats ───");
+  const channel = await client.channels.fetch(CHANNEL_ID).catch(() => null);
   if (!channel) return;
 
-  let loadingMsg;
+  let msg;
   try {
-    loadingMsg = await channel.send({
-      embeds: [new EmbedBuilder()
-        .setDescription("⏳ Récupération des statistiques en cours…")
-        .setColor(0xffa500)],
-    });
+    msg = await channel.send({ embeds: [new EmbedBuilder().setDescription("⏳ Récupération en cours…").setColor(0xffa500)] });
+    const all = await getAllCompanies();
+    console.log(`[Bot] ${all.length} entreprises au total`);
 
-    const companies = await getFrenchCompanies();
-
-    if (!companies.length) {
-      return loadingMsg.edit({
-        embeds: [new EmbedBuilder()
-          .setDescription(
-            "⚠️ Aucune entreprise française trouvée.\n" +
-            "L'API Trucky ne retourne peut-être pas le champ `country` sur cet endpoint public.\n" +
-            "Vérifiez les logs Railway pour voir la structure des données."
-          )
-          .setColor(0xff8800)],
-      });
+    // Log un exemple pour voir les champs pays
+    if (all[0]) {
+      const keys = Object.keys(all[0]);
+      console.log("[Bot] Clés item:", keys.join(", "));
+      const countryFields = keys.filter(k => k.toLowerCase().includes("country") || k.toLowerCase().includes("nation"));
+      countryFields.forEach(f => console.log(`[Bot] ${f} =`, all[0][f]));
     }
 
-    await loadingMsg.edit({ embeds: [buildEmbed(companies)] });
-    console.log(`[Bot] ✅ Stats envoyées (${companies.length} entreprises françaises)`);
-  } catch (err) {
-    console.error("[Bot] ❌ Erreur :", err.message);
-    loadingMsg?.edit({
-      embeds: [new EmbedBuilder()
-        .setDescription(`❌ Erreur : ${err.message}`)
-        .setColor(0xff0000)],
-    }).catch(() => {});
+    const french = all.filter(isFrench);
+    console.log(`[Bot] Entreprises françaises : ${french.length} / ${all.length}`);
+
+    if (!french.length) {
+      // Fallback : si 0 résultat, afficher un message d'aide avec les champs trouvés
+      const sample = all[0] ? Object.keys(all[0]).join(", ") : "API inaccessible";
+      return msg.edit({ embeds: [new EmbedBuilder()
+        .setTitle("⚠️ Aucune entreprise française trouvée")
+        .setDescription(
+          `Aucune entrée ne correspond à "France" dans les données.\n\n` +
+          `**Champs disponibles dans l'API :**\n\`${sample}\`\n\n` +
+          `👉 Active \`DEBUG_MODE=true\` dans les variables Railway pour voir la structure complète.`
+        )
+        .setColor(0xff8800)] });
+    }
+
+    await msg.edit({ embeds: [buildEmbed(french)] });
+    console.log(`[Bot] ✅ Stats envoyées (${french.length} VTCs FR)`);
+  } catch (e) {
+    console.error("[Bot] ❌", e.message);
+    msg?.edit({ embeds: [new EmbedBuilder().setDescription(`❌ ${e.message}`).setColor(0xff0000)] }).catch(() => {});
   }
 }
 
-// ─────────────────────────────────────────────
-//  Vérifications au démarrage
-// ─────────────────────────────────────────────
-if (!DISCORD_TOKEN) {
-  console.error("❌ DISCORD_TOKEN manquant !");
-  process.exit(1);
-}
-if (!CHANNEL_ID) {
-  console.error("❌ CHANNEL_ID manquant !");
-  process.exit(1);
-}
+if (!DISCORD_TOKEN) { console.error("❌ DISCORD_TOKEN manquant"); process.exit(1); }
+if (!CHANNEL_ID)    { console.error("❌ CHANNEL_ID manquant");    process.exit(1); }
 
 client.login(DISCORD_TOKEN);
