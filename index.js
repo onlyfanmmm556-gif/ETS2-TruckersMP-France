@@ -53,7 +53,12 @@ async function getCompaniesLeaderboard() {
     console.log(`[Trucky] ${items.length} entreprises reçues`);
     if (items[0]) {
       console.log("[Trucky] Clés company[0]:", Object.keys(items[0]).join(", "));
-      console.log("[Trucky] company[0]:", JSON.stringify(items[0]).slice(0, 500));
+      console.log("[Trucky] company[0] complet:", JSON.stringify(items[0], null, 2));
+      // Log spécifique des stats pour débug
+      if (items[0].stats) {
+        console.log("[Trucky] stats keys:", Object.keys(items[0].stats).join(", "));
+        console.log("[Trucky] stats values:", JSON.stringify(items[0].stats));
+      }
     }
     return items;
 
@@ -73,21 +78,31 @@ function extractItems(raw) {
 }
 
 // Normalise les miles/km selon la clé retournée par l'API
+// Tente toutes les variantes connues, puis fallback sur la première valeur numérique > 0
 function getDistance(company) {
   const stats = company.stats ?? {};
-  return (
-    stats[STATS_TYPE] ??
-    stats.real_miles  ??
-    stats.driven_miles ??
-    stats.real_km     ??
-    stats.km          ??
-    company[STATS_TYPE] ??
-    company.real_miles ??
-    company.driven_miles ??
-    company.real_km ??
-    company.km ??
-    0
-  );
+
+  const candidates = [
+    stats[STATS_TYPE], stats.real_miles, stats.driven_miles,
+    stats.total_miles, stats.miles, stats.real_km,
+    stats.driven_km,   stats.total_km,  stats.km, stats.distance,
+    company[STATS_TYPE], company.real_miles, company.driven_miles,
+    company.total_miles, company.miles, company.real_km,
+    company.driven_km,   company.total_km,  company.km, company.distance,
+  ];
+
+  for (const v of candidates) {
+    const n = Number(v);
+    if (!isNaN(n) && n > 0) return n;
+  }
+
+  // Dernier recours : première valeur numérique > 0 dans stats
+  for (const v of Object.values(stats)) {
+    const n = Number(v);
+    if (!isNaN(n) && n > 0) return n;
+  }
+
+  return 0;
 }
 
 function getMembers(company) {
