@@ -52,13 +52,9 @@ async function getCompaniesLeaderboard() {
     const items = extractItems(r.data);
     console.log(`[Trucky] ${items.length} entreprises reçues`);
     if (items[0]) {
-      console.log("[Trucky] Clés company[0]:", Object.keys(items[0]).join(", "));
-      console.log("[Trucky] company[0] complet:", JSON.stringify(items[0], null, 2));
-      // Log spécifique des stats pour débug
-      if (items[0].stats) {
-        console.log("[Trucky] stats keys:", Object.keys(items[0].stats).join(", "));
-        console.log("[Trucky] stats values:", JSON.stringify(items[0].stats));
-      }
+      const dist = items[0].driven_distance ?? "N/A";
+      const unit = items[0].distance_unit ?? "?";
+      console.log(`[Trucky] #1 : ${items[0].name} — ${dist} ${unit}`);
     }
     return items;
 
@@ -83,6 +79,7 @@ function getDistance(company) {
   const stats = company.stats ?? {};
 
   const candidates = [
+    company.driven_distance,           // ← clé réelle retournée par l'API
     stats[STATS_TYPE], stats.real_miles, stats.driven_miles,
     stats.total_miles, stats.miles, stats.real_km,
     stats.driven_km,   stats.total_km,  stats.km, stats.distance,
@@ -114,10 +111,10 @@ function getMembers(company) {
   );
 }
 
-function fmtDist(v) {
+function fmtDist(v, unit) {
   const n = Number(v);
   if (!n || isNaN(n)) return null;
-  const label = STATS_TYPE.includes("km") ? "km" : "mi";
+  const label = unit ?? (STATS_TYPE.includes("km") ? "km" : "mi");
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)} M ${label}`;
   if (n >= 1_000)     return `${(n / 1_000).toFixed(1)} k ${label}`;
   return `${n.toLocaleString("fr-FR")} ${label}`;
@@ -145,7 +142,7 @@ function buildEmbed(companies) {
   companies.forEach((c, i) => {
     const rank    = c.position ?? c.rank ?? (i + 1);
     const medal   = medals[i] ?? `\`#${String(rank).padStart(2, "0")}\``;
-    const dist    = fmtDist(getDistance(c));
+    const dist    = fmtDist(getDistance(c), c.distance_unit);
     const members = fmtNum(getMembers(c));
     const tag     = c.tag ? ` [${c.tag}]` : "";
 
