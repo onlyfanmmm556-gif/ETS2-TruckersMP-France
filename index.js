@@ -7,11 +7,15 @@ const {
 const axios = require("axios");
 const cron = require("node-cron");
 
+// ─── CONFIG ─────────────────────────────────────────────────────────────────
 const DISCORD_TOKEN  = process.env.DISCORD_TOKEN;
 const CHANNEL_ID     = process.env.CHANNEL_ID;
-const STATS_INTERVAL = process.env.STATS_INTERVAL || "0 * * * *";
-const MAX_COMPANIES  = parseInt(process.env.MAX_COMPANIES || "30");
+const STATS_INTERVAL = process.env.STATS_INTERVAL || "*/30 * * * *"; // toutes les 30 min
+const MAX_COMPANIES  = parseInt(process.env.MAX_COMPANIES || "18");
 const BOT_NAME       = process.env.BOT_NAME || "TruckyStatsBotFR";
+const STATS_TYPE     = process.env.STATS_TYPE || "real_miles"; // real_miles | driven_miles
+const GAME           = process.env.GAME || "1";                // 1=ETS2 2=ATS
+// ─────────────────────────────────────────────────────────────────────────────
 
 const truckyApi = axios.create({
   baseURL: "https://e.truckyapp.com/api/v1",
@@ -23,117 +27,85 @@ const truckyApi = axios.create({
   timeout: 15000,
 });
 
-async function getFrenchLeaderboard() {
-  console.log("[Trucky] Récupération users leaderboard France...");
+// Récupère le leaderboard entreprises FR directement depuis l'endpoint dédié
+async function getCompaniesLeaderboard() {
+  const now = new Date();
+  console.log("[Trucky] Récupération leaderboard entreprises FR...");
 
-  let allUsers = [];
-  let page = 1;
-  let hasMore = true;
+  try {
+    const r = await truckyApi.get("/companies/leaderboards", {
+      params: {
+        name:         "",
+        country_code: "FR",
+        company_type: "",
+        language:     "",
+        recruitment:  "",
+        game:         GAME,
+        stats_type:   STATS_TYPE,
+        month:        now.getMonth() + 1,
+        year:         now.getFullYear(),
+        page:         1,
+        perPage:      MAX_COMPANIES,
+      },
+    });
 
-  while (hasMore && page <= 20) {
-    try {
-      const r = await truckyApi.get("/users/leaderboards", {
-        params: {
-          period:  "monthly",
-          game:    "",
-          name:    "",
-          country: "france",
-          page,
-          perPage: 50,
-        },
-      });
-
-      const raw   = r.data;
-      const items = extractItems(raw);
-      console.log(`[Trucky] Page ${page} — ${items.length} users`);
-
-      if (items.length === 0) { hasMore = false; break; }
-
-      if (page === 1 && items[0]) {
-        console.log("[Trucky] Clés user[0]:", Object.keys(items[0]).join(", "));
-        console.log("[Trucky] user[0]:", JSON.stringify(items[0]).slice(0, 500));
-      }
-
-      allUsers = allUsers.concat(items);
-
-      const total = raw.total ?? raw.meta?.total ?? raw.data?.total ?? null;
-      if (total && allUsers.length >= total) hasMore = false;
-      else if (items.length < 50) hasMore = false;
-      else page++;
-
-    } catch (err) {
-      console.error(`[Trucky] Erreur page ${page}:`, err.message);
-      hasMore = false;
+    const items = extractItems(r.data);
+    console.log(`[Trucky] ${items.length} entreprises reçues`);
+    if (items[0]) {
+      console.log("[Trucky] Clés company[0]:", Object.keys(items[0]).join(", "));
+      console.log("[Trucky] company[0]:", JSON.stringify(items[0]).slice(0, 500));
     }
+    return items;
+
+  } catch (err) {
+    console.error("[Trucky] Erreur API :", err.message);
+    return [];
   }
-
-  console.log(`[Trucky] Total users français : ${allUsers.length}`);
-  if (allUsers.length === 0) return [];
-
-  const companyMap = {};
-
-  for (const user of allUsers) {
-    const companyName =
-      user.company?.name ??
-      user.vtc?.name ??
-      user.company_name ??
-      user.vtc_name ??
-      null;
-
-    if (!companyName) continue;
-
-    const companyId =
-      user.company?.id ??
-      user.vtc?.id ??
-      user.company_id ??
-      user.vtc_id ??
-      companyName;
-
-    if (!companyMap[companyId]) {
-      companyMap[companyId] = { name: companyName, km: 0, members: 0 };
-    }
-
-    const userKm =
-      user.real_km ??
-      user.km ??
-      user.distance ??
-      user.total_km ??
-      user.driven_km ??
-      user.stats?.real_km ??
-      user.stats?.km ??
-      0;
-
-    companyMap[companyId].km      += Number(userKm) || 0;
-    companyMap[companyId].members += 1;
-  }
-
-  const sorted = Object.values(companyMap)
-    .sort((a, b) => b.km - a.km)
-    .slice(0, MAX_COMPANIES);
-
-  console.log(`[Trucky] ${sorted.length} VTCs françaises trouvées`);
-  if (sorted[0]) console.log(`[Trucky] #1 : ${sorted[0].name} — ${sorted[0].km} km`);
-
-  return sorted;
 }
 
 function extractItems(raw) {
   if (Array.isArray(raw))                             return raw;
+  if (Array.isArray(raw.response))                    return raw.response;
   if (Array.isArray(raw.data))                        return raw.data;
   if (raw.data?.data && Array.isArray(raw.data.data)) return raw.data.data;
-  if (Array.isArray(raw.response))                    return raw.response;
   if (Array.isArray(raw.items))                       return raw.items;
-  if (Array.isArray(raw.users))                       return raw.users;
   return [];
 }
 
-function fmtKm(v) {
-  if (!v && v !== 0) return null;
+// Normalise les miles/km selon la clé retournée par l'API
+function getDistance(company) {
+  const stats = company.stats ?? {};
+  return (
+    stats[STATS_TYPE] ??
+    stats.real_miles  ??
+    stats.driven_miles ??
+    stats.real_km     ??
+    stats.km          ??
+    company[STATS_TYPE] ??
+    company.real_miles ??
+    company.driven_miles ??
+    company.real_km ??
+    company.km ??
+    0
+  );
+}
+
+function getMembers(company) {
+  return (
+    company.members_count ??
+    company.members       ??
+    company.drivers_count ??
+    null
+  );
+}
+
+function fmtDist(v) {
   const n = Number(v);
-  if (isNaN(n) || n === 0) return null;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)} M km`;
-  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)} k km`;
-  return `${n.toLocaleString("fr-FR")} km`;
+  if (!n || isNaN(n)) return null;
+  const label = STATS_TYPE.includes("km") ? "km" : "mi";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)} M ${label}`;
+  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)} k ${label}`;
+  return `${n.toLocaleString("fr-FR")} ${label}`;
 }
 
 function fmtNum(v) {
@@ -141,23 +113,30 @@ function fmtNum(v) {
   return (!v || isNaN(n) || n === 0) ? null : n.toLocaleString("fr-FR");
 }
 
+function gameLabel()  { return GAME === "2" ? "ATS" : "ETS2"; }
+function statsLabel() { return STATS_TYPE === "driven_miles" ? "Miles totaux" : "Miles réels"; }
+
 function buildEmbed(companies) {
-  const now = new Date().toLocaleDateString("fr-FR", {
+  const now = new Date();
+  const dateFR = now.toLocaleDateString("fr-FR", {
     day: "2-digit", month: "long", year: "numeric",
     hour: "2-digit", minute: "2-digit",
   });
+  const moisFR = now.toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
 
   const medals = ["🥇", "🥈", "🥉"];
   let board = "";
 
   companies.forEach((c, i) => {
-    const medal   = medals[i] ?? `\`${String(i + 1).padStart(2)}\``;
-    const km      = fmtKm(c.km);
-    const members = fmtNum(c.members);
+    const rank    = c.position ?? c.rank ?? (i + 1);
+    const medal   = medals[i] ?? `\`#${String(rank).padStart(2, "0")}\``;
+    const dist    = fmtDist(getDistance(c));
+    const members = fmtNum(getMembers(c));
+    const tag     = c.tag ? ` [${c.tag}]` : "";
 
-    board += `${medal} **${c.name}**\n`;
+    board += `${medal} **${c.name}**${tag}\n`;
     const details = [];
-    if (km)      details.push(`🛣️ ${km}`);
+    if (dist)    details.push(`🛣️ ${dist}`);
     if (members) details.push(`👥 ${members}`);
     if (details.length) board += `　${details.join("  ")}\n`;
     board += "\n";
@@ -166,10 +145,11 @@ function buildEmbed(companies) {
   if (!board.trim()) board = "Aucune donnée disponible.";
 
   const embed = new EmbedBuilder()
-    .setTitle(`🇫🇷  Top ${companies.length} VTCs Françaises — Trucky Hub`)
+    .setTitle(`🇫🇷  Top ${companies.length} VTCs Françaises — ${moisFR}`)
+    .setDescription(`**Jeu :** ${gameLabel()} · **Stats :** ${statsLabel()}`)
     .setColor(0x0055a4)
     .setTimestamp()
-    .setFooter({ text: `Mise à jour : ${now}  •  classement mensuel  •  hub.truckyapp.com` });
+    .setFooter({ text: `Màj : ${dateFR}  •  toutes les 30 min  •  Trucky API` });
 
   if (board.length <= 1000) {
     embed.addFields({ name: "🏆  Classement du mois", value: board });
@@ -177,8 +157,8 @@ function buildEmbed(companies) {
     const lines = board.split("\n\n").filter(Boolean);
     const mid   = Math.ceil(lines.length / 2);
     embed.addFields(
-      { name: `🏆  #1 – ${mid}`,                   value: lines.slice(0, mid).join("\n\n") + "\n", inline: true },
-      { name: `🏆  #${mid + 1} – ${lines.length}`, value: lines.slice(mid).join("\n\n")   + "\n", inline: true }
+      { name: `🏆  #1 – #${mid}`,                    value: lines.slice(0, mid).join("\n\n") + "\n", inline: true },
+      { name: `🏆  #${mid + 1} – #${lines.length}`,  value: lines.slice(mid).join("\n\n")   + "\n", inline: true }
     );
   }
 
@@ -190,11 +170,13 @@ function buildEmbed(companies) {
   return embed;
 }
 
+// ─── Discord ──────────────────────────────────────────────────────────────────
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+let cachedMessageId = null; // édite le même message plutôt que de spammer
 
 client.once("ready", () => {
   console.log(`[Discord] Connecté : ${client.user.tag}`);
-  client.user.setActivity("le Top 30 🇫🇷", { type: ActivityType.Watching });
+  client.user.setActivity("le Top FR 🇫🇷", { type: ActivityType.Watching });
   sendStats();
   cron.schedule(STATS_INTERVAL, () => {
     console.log("[Cron] Déclenchement planifié");
@@ -210,16 +192,37 @@ async function sendStats() {
   if (!channel) return;
 
   let loadingMsg;
-  try {
-    loadingMsg = await channel.send({
-      embeds: [
-        new EmbedBuilder()
-          .setDescription("⏳ Récupération du classement France en cours…")
-          .setColor(0xffa500),
-      ],
-    });
 
-    const companies = await getFrenchLeaderboard();
+  try {
+    // Essaie d'éditer le message précédent, sinon en crée un nouveau
+    if (cachedMessageId) {
+      try {
+        loadingMsg = await channel.messages.fetch(cachedMessageId);
+        await loadingMsg.edit({
+          embeds: [
+            new EmbedBuilder()
+              .setDescription("⏳ Mise à jour du classement en cours…")
+              .setColor(0xffa500),
+          ],
+        });
+      } catch {
+        cachedMessageId = null;
+        loadingMsg = null;
+      }
+    }
+
+    if (!loadingMsg) {
+      loadingMsg = await channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setDescription("⏳ Récupération du classement France en cours…")
+            .setColor(0xffa500),
+        ],
+      });
+      cachedMessageId = loadingMsg.id;
+    }
+
+    const companies = await getCompaniesLeaderboard();
 
     if (!companies.length) {
       return loadingMsg.edit({
@@ -248,6 +251,7 @@ async function sendStats() {
   }
 }
 
+// ─── Démarrage ────────────────────────────────────────────────────────────────
 if (!DISCORD_TOKEN) { console.error("❌ DISCORD_TOKEN manquant !"); process.exit(1); }
 if (!CHANNEL_ID)    { console.error("❌ CHANNEL_ID manquant !");    process.exit(1); }
 client.login(DISCORD_TOKEN);
