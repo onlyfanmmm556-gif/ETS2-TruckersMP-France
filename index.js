@@ -52,9 +52,22 @@ async function getCompaniesLeaderboard() {
     const items = extractItems(r.data);
     console.log(`[Trucky] ${items.length} entreprises reçues`);
     if (items[0]) {
-      const dist = items[0].driven_distance ?? "N/A";
-      const unit = items[0].distance_unit ?? "?";
-      console.log(`[Trucky] #1 : ${items[0].name} — ${dist} ${unit}`);
+      const c0 = items[0];
+      // Log toutes les clés avec valeur numérique > 0 pour trouver les km
+      const numericKeys = Object.entries(c0)
+        .filter(([k, v]) => typeof v === "number" && v > 0)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(", ");
+      console.log(`[Trucky] #1 champs numériques: ${numericKeys || "AUCUN"}`);
+      console.log(`[Trucky] #1 driven_distance=${c0.driven_distance} distance_unit=${c0.distance_unit}`);
+      // Idem dans stats si présent
+      if (c0.stats && typeof c0.stats === "object") {
+        const statsKeys = Object.entries(c0.stats)
+          .filter(([k, v]) => typeof v === "number" && v > 0)
+          .map(([k, v]) => `${k}=${v}`)
+          .join(", ");
+        console.log(`[Trucky] #1 stats numériques: ${statsKeys || "AUCUN"}`);
+      }
     }
     return items;
 
